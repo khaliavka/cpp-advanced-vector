@@ -78,6 +78,16 @@ class Vector {
   const_iterator cend() const noexcept;
 
  private:
+  template <typename InputIt, typename OutputIt>
+  void MoveOrCopy(InputIt first, InputIt last, OutputIt d_first);
+  template <typename InputIt, typename OutputIt>
+  void UninitMoveOrCopy(InputIt first, InputIt last, OutputIt d_first);
+  template <typename InputIt, typename OutputIt>
+  void TryUninitMoveOrCopy(InputIt first, InputIt last, OutputIt d_first,
+                           OutputIt dy_first, OutputIt dy_last);
+  template <typename InOutIt>
+  void MoveOrCopyBackward(InOutIt first, InOutIt last);
+
   RawMemory<T> data_;
   size_t size_ = 0;
 };
@@ -226,6 +236,7 @@ const T& Vector<T>::operator[](size_t index) const noexcept {
 
 template <typename T>
 T& Vector<T>::operator[](size_t index) noexcept {
+  assert(index < size_);
   return data_[index];
 }
 
@@ -235,12 +246,7 @@ void Vector<T>::Reserve(size_t new_capacity) {
     return;
   }
   RawMemory<T> new_data{new_capacity};
-  if constexpr (std::is_nothrow_move_constructible_v<T> ||
-                !std::is_copy_constructible_v<T>) {
-    std::uninitialized_move(begin(), end(), new_data.GetAddress());
-  } else {
-    std::uninitialized_copy(begin(), end(), new_data.GetAddress());
-  }
+  UninitMoveOrCopy(begin(), end(), new_data.GetAddress());
   std::destroy(begin(), end());
   data_.Swap(new_data);
 }
@@ -271,6 +277,7 @@ template <typename T>
 template <typename... Args>
 typename Vector<T>::iterator Vector<T>::Emplace(const_iterator pos,
                                                 Args&&... args) {
+  assert(pos >= begin() && pos <= end());
   auto pos_non_const = const_cast<iterator>(pos);
   if (size_ == data_.Capacity()) {
     RawMemory<T> new_data{size_ == 0 ? 1 : size_ * 2};
@@ -278,34 +285,10 @@ typename Vector<T>::iterator Vector<T>::Emplace(const_iterator pos,
     auto new_begin = new_data.GetAddress();
     auto new_pos = new (new_data.GetAddress() + distance_from_begin)
         T(std::forward<Args>(args)...);
-    if constexpr (std::is_nothrow_move_constructible_v<T> ||
-                  !std::is_copy_constructible_v<T>) {
-      try {
-        std::uninitialized_move(begin(), pos_non_const, new_begin);
-      } catch (...) {
-        std::destroy_at(new_pos);
-        throw;
-      }
-      try {
-        std::uninitialized_move(pos_non_const, end(), new_pos + 1);
-      } catch (...) {
-        std::destroy(new_begin, new_pos + 1);
-        throw;
-      }
-    } else {
-      try {
-        std::uninitialized_copy(cbegin(), pos, new_begin);
-      } catch (...) {
-        std::destroy_at(new_pos);
-        throw;
-      }
-      try {
-        std::uninitialized_copy(pos, cend(), new_pos + 1);
-      } catch (...) {
-        std::destroy(new_begin, new_pos + 1);
-        throw;
-      }
-    }
+    TryUninitMoveOrCopy(begin(), pos_non_const, new_begin, new_pos,
+                        new_pos + 1);
+    TryUninitMoveOrCopy(pos_non_const, end(), new_pos + 1, new_begin,
+                        new_pos + 1);
     std::destroy(begin(), end());
     data_.Swap(new_data);
     ++size_;
@@ -313,16 +296,7 @@ typename Vector<T>::iterator Vector<T>::Emplace(const_iterator pos,
   }
   if (pos != end()) {
     T element(std::forward<Args>(args)...);
-    if constexpr (std::is_nothrow_move_constructible_v<T> ||
-                  std::is_nothrow_move_assignable_v<T> ||
-                  !std::is_copy_constructible_v<T> ||
-                  !std::is_copy_assignable_v<T>) {
-      std::uninitialized_move(end() - 1, end(), end());
-      std::move_backward(pos_non_const, end() - 1, end());
-    } else {
-      std::uninitialized_copy(cend() - 1, cend(), end());
-      std::copy_backward(pos, cend() - 1, end());
-    }
+    MoveOrCopyBackward(pos_non_const, end());
     *pos_non_const = std::move(element);
   } else {
     new (end()) T(std::forward<Args>(args)...);
@@ -333,14 +307,10 @@ typename Vector<T>::iterator Vector<T>::Emplace(const_iterator pos,
 
 template <typename T>
 typename Vector<T>::iterator Vector<T>::Erase(const_iterator pos) {
+  assert(pos >= begin() && pos < end());
   auto pos_non_const = const_cast<iterator>(pos);
-  if constexpr (std::is_nothrow_move_constructible_v<T> ||
-                !std::is_copy_constructible_v<T>) {
-    std::move(pos_non_const + 1, end(), pos_non_const);
-  } else {
-    std::copy(pos + 1, cend(), pos_non_const);
-  }
-  std::destroy_at(end() - 1);
+  MoveOrCopy(pos_non_const + 1, end(), pos_non_const);
+    std::destroy_at(end() - 1);
   --size_;
   return pos_non_const;
 }
@@ -361,16 +331,11 @@ T& Vector<T>::EmplaceBack(Args&&... args) {
   if (size_ == data_.Capacity()) {
     RawMemory<T> new_data{size_ == 0 ? 1 : size_ * 2};
     new (new_data.GetAddress() + size_) T(std::forward<Args>(args)...);
-    if constexpr (std::is_nothrow_move_constructible_v<T> ||
-                  !std::is_copy_constructible_v<T>) {
-      std::uninitialized_move(begin(), end(), new_data.GetAddress());
-    } else {
-      std::uninitialized_copy(begin(), end(), new_data.GetAddress());
-    }
+    UninitMoveOrCopy(begin(), end(), new_data.GetAddress());
     std::destroy(begin(), end());
     data_.Swap(new_data);
   } else {
-    new (data_.GetAddress() + size_) T(std::forward<Args>(args)...);
+    new (end()) T(std::forward<Args>(args)...);
   }
   ++size_;
   return Back();
@@ -378,6 +343,7 @@ T& Vector<T>::EmplaceBack(Args&&... args) {
 
 template <typename T>
 void Vector<T>::PopBack() {
+  assert(size_ != 0);
   --size_;
   std::destroy_at(end());
 }
@@ -391,6 +357,57 @@ template <typename T>
 void Vector<T>::Swap(Vector& other) noexcept {
   data_.Swap(other.data_);
   std::swap(size_, other.size_);
+}
+
+template <typename T>
+template <typename InputIt, typename OutputIt>
+void Vector<T>::MoveOrCopy(InputIt first, InputIt last, OutputIt d_first) {
+  if constexpr (std::is_nothrow_move_constructible_v<T> ||
+                !std::is_copy_constructible_v<T>) {
+    std::move(first, last, d_first);
+  } else {
+    std::copy(first, last, d_first);
+  }
+}
+
+template <typename T>
+template <typename InputIt, typename OutputIt>
+void Vector<T>::UninitMoveOrCopy(InputIt first, InputIt last,
+                                 OutputIt d_first) {
+  if constexpr (std::is_nothrow_move_constructible_v<T> ||
+                !std::is_copy_constructible_v<T>) {
+    std::uninitialized_move(first, last, d_first);
+  } else {
+    std::uninitialized_copy(first, last, d_first);
+  }
+}
+
+template <typename T>
+template <typename InputIt, typename OutputIt>
+void Vector<T>::TryUninitMoveOrCopy(InputIt first, InputIt last,
+                                    OutputIt d_first, OutputIt dy_first,
+                                    OutputIt dy_last) {
+  try {
+    UninitMoveOrCopy(first, last, d_first);
+  } catch (...) {
+    std::destroy(dy_first, dy_last);
+    throw;
+  }
+}
+
+template <typename T>
+template <typename InOutIt>
+void Vector<T>::MoveOrCopyBackward(InOutIt first, InOutIt last) {
+  if constexpr (std::is_nothrow_move_constructible_v<T> ||
+                std::is_nothrow_move_assignable_v<T> ||
+                !std::is_copy_constructible_v<T> ||
+                !std::is_copy_assignable_v<T>) {
+    std::uninitialized_move(last - 1, last, last);
+    std::move_backward(first, last - 1, last);
+  } else {
+    std::uninitialized_copy(last - 1, last, last);
+    std::copy_backward(first, last - 1, last);
+  }
 }
 
 template <typename T>
