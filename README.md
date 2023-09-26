@@ -17,7 +17,5 @@
 ## Требования:
 - C++17 (STL)
 - GCC, Clang
-## To Do:
-- Метод ShrinkToFit аналогичный таковому в std::vector.
-- Метод Clear.
-- Метод Data.
+## Планы по доработке:
+Добавить методы ShrinkToFit, Clear и Data.
