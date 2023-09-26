@@ -19,3 +19,8 @@
 - GCC, Clang
 ## Планы по доработке:
 Добавить методы ShrinkToFit, Clear и Data.
+## Стек технологий:
+- RAII
+- SFINAE
+- forwarding references
+- STL
